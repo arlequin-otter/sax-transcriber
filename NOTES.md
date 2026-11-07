@@ -14,10 +14,21 @@ You play a melody. The app listens, works out which notes you played and how lon
 | `NOTES.md` | This explanation. |
 | `LICENSE` | The MIT licence: anyone may use or copy the app, with no guarantees. |
 | `.gitignore` | A list of junk files (like Windows thumbnails) that version control should ignore. |
+| `.nojekyll` | An empty marker file telling GitHub Pages to serve the files exactly as they are, without trying to "build" a website from them. |
 
 ## Version control (git)
 
 The folder is a *git repository*. Think of it as a save-history: each time we finish a step we take a snapshot ("commit"), so we can always go back. The same history is what gets uploaded to GitHub to publish the app.
+
+Saved versions are signed `arlequin-otter` with GitHub's private "noreply" email, so your real email is never published.
+
+## Publishing (GitHub Pages)
+
+- Code lives at: https://github.com/arlequin-otter/sax-transcriber
+- The app lives at: https://arlequin-otter.github.io/sax-transcriber/
+- Every time a new version is uploaded ("pushed"), GitHub Pages updates the app automatically within a minute or two.
+- GitHub Pages was switched on once, in the repository's **Settings → Pages**, with "Deploy from a branch", branch `main`, folder `/ (root)`.
+- The address is `https`, which is what lets phones use the microphone.
 
 ## Step 1 — Getting your melody into the app ✅
 
