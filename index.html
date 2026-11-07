@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sax Transcriber</title>
+  <meta name="description" content="Turn a recorded melody into alto saxophone sheet music. Runs entirely on your device.">
+  <style>
+    :root {
+      --bg: #f6f5f2;
+      --card: #ffffff;
+      --text: #1d1d1f;
+      --muted: #6b6b70;
+      --accent: #b8860b;      /* brass */
+      --accent-text: #ffffff;
+      --danger: #c0392b;
+      --border: #e2e0da;
+      --wave: #b8860b;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #161618;
+        --card: #222226;
+        --text: #f2f2f2;
+        --muted: #a0a0a8;
+        --accent: #e0a82e;
+        --accent-text: #161618;
+        --danger: #ff6b5b;
+        --border: #36363c;
+        --wave: #e0a82e;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 16px; }
+    h1 { font-size: 1.5rem; margin: 8px 0 4px; }
+    .tagline { color: var(--muted); margin: 0 0 16px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .card h2 { font-size: 1.1rem; margin: 0 0 12px; }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    button, .file-btn {
+      font: inherit;
+      font-weight: 600;
+      border: none;
+      border-radius: 10px;
+      padding: 12px 18px;
+      min-height: 48px;           /* easy to tap on a phone */
+      cursor: pointer;
+      background: var(--accent);
+      color: var(--accent-text);
+    }
+    button.recording { background: var(--danger); color: #fff; }
+    .file-btn {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      display: inline-flex;
+      align-items: center;
+    }
+    .file-btn input { display: none; }
+    .timer { font-variant-numeric: tabular-nums; font-size: 1.1rem; min-width: 4ch; }
+    .meter {
+      flex: 1 1 120px;
+      height: 10px;
+      background: var(--border);
+      border-radius: 5px;
+      overflow: hidden;
+      visibility: hidden;
+    }
+    .meter.on { visibility: visible; }
+    .meter > div { height: 100%; width: 0; background: var(--danger); transition: width 60ms linear; }
+    .status { margin: 12px 0 0; color: var(--muted); min-height: 1.45em; }
+    .status.error { color: var(--danger); font-weight: 600; }
+    #result { display: none; margin-top: 16px; }
+    #result.on { display: block; }
+    canvas {
+      width: 100%;
+      height: 90px;
+      display: block;
+      border-radius: 8px;
+      background: var(--bg);
+    }
+    audio { width: 100%; margin-top: 10px; }
+    .privacy { color: var(--muted); font-size: 0.85rem; text-align: center; margin-top: 24px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Sax Transcriber</h1>
+  <p class="tagline">Record a melody and turn it into alto sax sheet music.</p>
+
+  <!-- STEP 1: get some audio, either from the microphone or from a file -->
+  <section class="card" aria-labelledby="audio-title">
+    <h2 id="audio-title">1. Your melody</h2>
+    <div class="row">
+      <button id="recordBtn" type="button">● Start recording</button>
+      <span id="timer" class="timer" aria-live="off">0:00</span>
+      <div id="meter" class="meter" aria-hidden="true"><div></div></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label class="file-btn">
+        📂 Load an audio file
+        <input id="fileInput" type="file" accept="audio/*">
+      </label>
+    </div>
+    <p id="status" class="status" role="status"></p>
+
+    <div id="result">
+      <canvas id="wave" aria-label="Picture of the recorded sound"></canvas>
+      <audio id="player" controls></audio>
+    </div>
+  </section>
+
+  <p class="privacy">Everything happens on this device. Your audio is never uploaded.</p>
+</main>
+
+<script>
+"use strict";
+
+// ---------- Shared state ----------
+// The decoded sound lives here so the next steps (note detection) can use it.
+const state = {
+  audio: null,        // AudioBuffer: the decoded sound
+  audioName: "",      // "Recording" or the file name
+};
+
+// ---------- Page elements ----------
+const recordBtn = document.getElementById("recordBtn");
+const timerEl   = document.getElementById("timer");
+const meterEl   = document.getElementById("meter");
+const meterBar  = meterEl.firstElementChild;
+const fileInput = document.getElementById("fileInput");
+const statusEl  = document.getElementById("status");
+const resultEl  = document.getElementById("result");
+const waveEl    = document.getElementById("wave");
+const playerEl  = document.getElementById("player");
+
+function setStatus(message, isError = false) {
+  statusEl.textContent = message;
+  statusEl.classList.toggle("error", isError);
+}
+
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// One shared audio engine, created on first tap (browsers require a tap first).
+let audioCtx = null;
+function getAudioContext() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+
+// ---------- Recording from the microphone ----------
+let recorder = null;
+let micStream = null;
+let chunks = [];
+let startTime = 0;
+let tickTimer = null;
+let meterFrame = null;
+
+recordBtn.addEventListener("click", () => {
+  if (recorder && recorder.state === "recording") stopRecording();
+  else startRecording();
+});
+
+async function startRecording() {
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    setStatus("The microphone only works when the app is opened from a secure (https) address.", true);
+    return;
+  }
+  if (!window.MediaRecorder) {
+    setStatus("This browser can't record audio. Please use Chrome.", true);
+    return;
+  }
+
+  try {
+    // Turn off the phone-call style "clean-up" filters: they distort musical notes.
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    });
+  } catch (err) {
+    if (err.name === "NotAllowedError") {
+      setStatus("Microphone permission was refused. Allow it in the browser's site settings (the icon left of the address bar), then try again.", true);
+    } else if (err.name === "NotFoundError") {
+      setStatus("No microphone was found on this device.", true);
+    } else {
+      setStatus("Couldn't start the microphone: " + err.message, true);
+    }
+    return;
+  }
+
+  // Pick a recording format the browser supports.
+  const formats = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
+  const mimeType = formats.find(f => MediaRecorder.isTypeSupported(f)) || "";
+
+  chunks = [];
+  recorder = new MediaRecorder(micStream, mimeType ? { mimeType } : undefined);
+  recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+  recorder.onstop = () => {
+    const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+    releaseMic();
+    loadAudio(blob, "Recording");
+  };
+  recorder.start();
+
+  // Update the button, timer and level meter.
+  recordBtn.textContent = "■ Stop recording";
+  recordBtn.classList.add("recording");
+  fileInput.disabled = true;
+  startTime = performance.now();
+  timerEl.textContent = "0:00";
+  tickTimer = setInterval(() => {
+    timerEl.textContent = formatTime((performance.now() - startTime) / 1000);
+  }, 250);
+  startMeter(micStream);
+  setStatus("Recording… play your melody, then tap Stop.");
+}
+
+function stopRecording() {
+  recorder.stop();   // the onstop handler above takes over from here
+  clearInterval(tickTimer);
+  stopMeter();
+  recordBtn.textContent = "● Start recording";
+  recordBtn.classList.remove("recording");
+  fileInput.disabled = false;
+  setStatus("Processing the recording…");
+}
+
+function releaseMic() {
+  // Switch the microphone off completely (the phone's mic indicator goes away).
+  if (micStream) micStream.getTracks().forEach(t => t.stop());
+  micStream = null;
+}
+
+// The little red bar that shows how loud the microphone is hearing you.
+function startMeter(stream) {
+  const ctx = getAudioContext();
+  ctx.resume();
+  const source = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  source.connect(analyser);
+  const data = new Float32Array(analyser.fftSize);
+  meterEl.classList.add("on");
+  const draw = () => {
+    analyser.getFloatTimeDomainData(data);
+    let peak = 0;
+    for (const v of data) peak = Math.max(peak, Math.abs(v));
+    meterBar.style.width = Math.min(100, peak * 140) + "%";
+    meterFrame = requestAnimationFrame(draw);
+  };
+  draw();
+}
+
+function stopMeter() {
+  cancelAnimationFrame(meterFrame);
+  meterBar.style.width = "0";
+  meterEl.classList.remove("on");
+}
+
+// ---------- Loading an audio file ----------
+fileInput.addEventListener("change", () => {
+  const file = fileInput.files[0];
+  if (file) loadAudio(file, file.name);
+  fileInput.value = "";   // so choosing the same file again still works
+});
+
+// ---------- Shared: decode the sound and show it ----------
+async function loadAudio(blob, name) {
+  setStatus("Reading the audio…");
+  try {
+    const bytes = await blob.arrayBuffer();
+    const buffer = await getAudioContext().decodeAudioData(bytes);
+    if (buffer.duration < 0.2) {
+      setStatus("That recording is too short. Try again and play for a few seconds.", true);
+      return;
+    }
+    state.audio = buffer;
+    state.audioName = name;
+
+    if (playerEl.src) URL.revokeObjectURL(playerEl.src);
+    playerEl.src = URL.createObjectURL(blob);
+    resultEl.classList.add("on");
+    drawWaveform(buffer);
+    setStatus(`${name} — ${formatTime(buffer.duration)} long. Press play below to listen.`);
+  } catch (err) {
+    setStatus("Couldn't read that audio. Try a different file (MP3, WAV or M4A usually work).", true);
+    console.error(err);
+  }
+}
+
+// Draws a picture of the sound: tall where it's loud, flat where it's quiet.
+function drawWaveform(buffer) {
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.floor(waveEl.clientWidth * dpr));
+  const height = Math.max(1, Math.floor(waveEl.clientHeight * dpr));
+  waveEl.width = width;
+  waveEl.height = height;
+  const ctx = waveEl.getContext("2d");
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--wave");
+
+  const samples = buffer.getChannelData(0);
+  const perPixel = Math.max(1, Math.floor(samples.length / width));
+  const mid = height / 2;
+  for (let x = 0; x < width; x++) {
+    let min = 1, max = -1;
+    const start = x * perPixel;
+    const end = Math.min(samples.length, start + perPixel);
+    for (let i = start; i < end; i++) {
+      const v = samples[i];
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    if (min > max) continue;
+    const top = mid - max * mid;
+    const bottom = mid - min * mid;
+    ctx.fillRect(x, top, 1, Math.max(1, bottom - top));
+  }
+}
+
+// Redraw the picture if the screen is rotated or resized.
+window.addEventListener("resize", () => { if (state.audio) drawWaveform(state.audio); });
+</script>
+</body>
+</html>
