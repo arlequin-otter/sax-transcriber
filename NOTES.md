@@ -11,6 +11,8 @@ You play a melody. The app listens, works out which notes you played and how lon
 | File | What it is |
 |---|---|
 | `index.html` | The whole app: the page you see plus the instructions that make it work. |
+| `basic-pitch.js` | Spotify's note-detection code (see step 2). Kept in its own file so it's clear which part was written by Spotify. |
+| `licenses/basic-pitch-LICENSE.txt` | Spotify's licence for that code (Apache 2.0), which must travel with it. |
 | `NOTES.md` | This explanation. |
 | `LICENSE` | The MIT licence: anyone may use or copy the app, with no guarantees. |
 | `.gitignore` | A list of junk files (like Windows thumbnails) that version control should ignore. |
@@ -45,14 +47,29 @@ Saved versions are signed `arlequin-otter` with GitHub's private "noreply" email
 
 **Why the microphone needs a secure (https) address:** browsers only let a page use the microphone if the page comes from a secure address, so that random websites can't secretly listen. Opening the file directly on your computer counts as safe; on your phone, the app will be served from GitHub Pages, which is secure.
 
+## Step 2 — Finding the notes ✅
+
+**What you see:** a "Detect notes" button, a progress bar, then a row of boxes, one per note (for example **A4** 1.50s · 0.49s = the note A4, starting 1.5 seconds in, lasting about half a second). "Play detected notes" plays them back with a simple electronic tone so you can compare by ear with your recording.
+
+**How it works:**
+
+- **The first time** you tap Detect, the app downloads the note detector: Google's TensorFlow.js (the "engine" that runs trained AI models) and Spotify's Basic Pitch model (the trained "ear"). About 3 MB, once; afterwards Chrome remembers it.
+- **Preparing the sound.** Basic Pitch expects a single channel (mono) at 22,050 samples per second, so the recording is converted to that first.
+- **Listening.** The model looks at the sound in 2-second slices and, for each tiny moment (about every 12 thousandths of a second), estimates how likely each of the 88 piano notes is to be starting or sounding. All this runs on your device.
+- **Turning that into notes.** Spotify's code then turns those likelihoods into a list of notes with a start time and a length. Notes shorter than about 0.13 s are ignored, as are sounds below C2 or above C7 (rumble and squeaks).
+- **One note at a time.** Basic Pitch can hear chords, but a sax can't play them. If two notes start together, the app keeps the stronger one (the other is usually a "ghost" overtone). If a note is still ringing when the next one starts, the first is cut short.
+- **Concert pitch.** The note names shown here are the *sounding* notes (what a piano would play). They will be converted to saxophone (written) notes in step 4.
+
+**Why Spotify's code is copied into `basic-pitch.js` instead of loaded from the internet:** the ready-made internet version of Basic Pitch automatically pulls in an old TensorFlow.js (from 2022) and an extra MIDI library we don't need. So the app uses Spotify's own published code (unchanged detection logic, only the unneeded MIDI part removed), with the approved TensorFlow.js 4.22.0 and Spotify's model, both loaded from jsDelivr at exact versions. The top of `basic-pitch.js` lists exactly what was changed.
+
+**Internet use:** besides the app's own files, the only downloads are TensorFlow.js and the Basic Pitch model, both from jsDelivr. Your audio is never sent anywhere.
+
 ## Libraries used so far
 
-None yet. Step 1 only uses features built into Chrome.
+| Library | Version | Licence | Maintainer | Loaded from | Why |
+|---|---|---|---|---|---|
+| TensorFlow.js | 4.22.0 | Apache 2.0 | Google | jsDelivr | Runs the note-detection model. |
+| Basic Pitch model | 1.0.1 | Apache 2.0 | Spotify | jsDelivr | The trained "ear" that recognises notes. |
+| Basic Pitch code | 1.0.1 | Apache 2.0 | Spotify | copied into `basic-pitch.js` | Turns the model's output into notes. **Policy exception approved on 2026-11-07:** not updated since January 2023. |
 
-Planned (approved):
-
-| Library | Licence | Maintainer | Why |
-|---|---|---|---|
-| VexFlow 5.0.0 | MIT | VexFlow open-source project | Draws the sheet music. |
-| TensorFlow.js 4.22.0 | Apache 2.0 | Google | The engine Basic Pitch runs on. |
-| Basic Pitch 1.0.1 | Apache 2.0 | Spotify | Detects the notes. **Policy exception approved on 2026-11-07:** the browser version has not been updated since January 2023. |
+Planned: VexFlow 5.0.0 (MIT, VexFlow open-source project) to draw the sheet music.

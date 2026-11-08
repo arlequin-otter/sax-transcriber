@@ -94,6 +94,32 @@
     }
     audio { width: 100%; margin-top: 10px; }
     .privacy { color: var(--muted); font-size: 0.85rem; text-align: center; margin-top: 24px; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.secondary {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    progress { width: 100%; height: 10px; margin-top: 12px; accent-color: var(--accent); display: none; }
+    progress.on { display: block; }
+    .notes-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 12px;
+      padding: 0;
+      list-style: none;
+    }
+    .notes-list li {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 4px 8px;
+      font-variant-numeric: tabular-nums;
+      font-size: 0.9rem;
+    }
+    .notes-list li b { font-size: 1rem; }
+    .notes-list li span { color: var(--muted); }
   </style>
 </head>
 <body>
@@ -121,6 +147,18 @@
       <canvas id="wave" aria-label="Picture of the recorded sound"></canvas>
       <audio id="player" controls></audio>
     </div>
+  </section>
+
+  <!-- STEP 2: find the notes in the sound with Spotify's Basic Pitch -->
+  <section class="card" aria-labelledby="detect-title">
+    <h2 id="detect-title">2. Find the notes</h2>
+    <div class="row">
+      <button id="detectBtn" type="button" disabled>🎵 Detect notes</button>
+      <button id="playNotesBtn" type="button" class="secondary" disabled>▶ Play detected notes</button>
+    </div>
+    <progress id="detectProgress" max="1" value="0"></progress>
+    <p id="detectStatus" class="status" role="status">Record or load a melody first.</p>
+    <ul id="notesList" class="notes-list" aria-label="Detected notes"></ul>
   </section>
 
   <p class="privacy">Everything happens on this device. Your audio is never uploaded.</p>
@@ -292,6 +330,7 @@ async function loadAudio(blob, name) {
     }
     state.audio = buffer;
     state.audioName = name;
+    resetNotes();
 
     if (playerEl.src) URL.revokeObjectURL(playerEl.src);
     playerEl.src = URL.createObjectURL(blob);
@@ -336,6 +375,212 @@ function drawWaveform(buffer) {
 
 // Redraw the picture if the screen is rotated or resized.
 window.addEventListener("resize", () => { if (state.audio) drawWaveform(state.audio); });
+
+// =====================================================================
+// STEP 2: Detect the notes with Basic Pitch
+// =====================================================================
+
+// Exact library versions (never change these without checking the library policy).
+const TFJS_URL  = "https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js";
+const MODEL_URL = "https://cdn.jsdelivr.net/npm/@spotify/basic-pitch@1.0.1/model/model.json";
+const BASIC_PITCH_SAMPLE_RATE = 22050;   // Basic Pitch needs mono sound at this rate
+
+// Detection settings (the same defaults Spotify's own demo uses).
+const DETECT = {
+  onsetThreshold: 0.5,   // how sure it must be that a note STARTS here
+  frameThreshold: 0.3,   // how sure it must be that a note is still SOUNDING
+  minNoteFrames: 11,     // ignore notes shorter than ~0.13 s (11 × 11.6 ms)
+  minHz: 65,             // ignore anything below C2 (rumble)
+  maxHz: 2100,           // ignore anything above C7 (squeaks, hiss)
+};
+
+state.notes = [];        // detected notes: { start, duration, midi, amplitude } (seconds, sounding pitch)
+
+const detectBtn      = document.getElementById("detectBtn");
+const playNotesBtn   = document.getElementById("playNotesBtn");
+const detectProgress = document.getElementById("detectProgress");
+const detectStatusEl = document.getElementById("detectStatus");
+const notesListEl    = document.getElementById("notesList");
+
+function setDetectStatus(message, isError = false) {
+  detectStatusEl.textContent = message;
+  detectStatusEl.classList.toggle("error", isError);
+}
+
+function resetNotes() {
+  state.notes = [];
+  notesListEl.innerHTML = "";
+  detectBtn.disabled = false;
+  playNotesBtn.disabled = true;
+  setDetectStatus("Ready. Tap “Detect notes”.");
+}
+
+// Load a script file from the internet once, and wait until it's ready.
+function loadScript(url) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = url;
+    s.crossOrigin = "anonymous";
+    s.onload = resolve;
+    s.onerror = () => reject(new Error("Couldn't download " + url));
+    document.head.appendChild(s);
+  });
+}
+
+// Download TensorFlow.js, Spotify's code and the trained model — only the first time.
+let basicPitchPromise = null;
+function getBasicPitch() {
+  if (!basicPitchPromise) {
+    basicPitchPromise = (async () => {
+      await loadScript(TFJS_URL);
+      await loadScript("basic-pitch.js");
+      const model = await tf.loadGraphModel(MODEL_URL);
+      return new BasicPitchLib.BasicPitch(model);
+    })();
+    basicPitchPromise.catch(() => { basicPitchPromise = null; });   // allow a retry
+  }
+  return basicPitchPromise;
+}
+
+// Convert any sound to mono at 22,050 samples per second.
+async function toBasicPitchFormat(buffer) {
+  const length = Math.ceil(buffer.duration * BASIC_PITCH_SAMPLE_RATE);
+  const offline = new OfflineAudioContext(1, length, BASIC_PITCH_SAMPLE_RATE);
+  const source = offline.createBufferSource();
+  source.buffer = buffer;
+  source.connect(offline.destination);   // stereo is mixed down to mono automatically
+  source.start();
+  const rendered = await offline.startRendering();
+  return rendered.getChannelData(0);
+}
+
+detectBtn.addEventListener("click", detectNotes);
+
+async function detectNotes() {
+  if (!state.audio) return;
+  detectBtn.disabled = true;
+  playNotesBtn.disabled = true;
+  notesListEl.innerHTML = "";
+  detectProgress.value = 0;
+  detectProgress.classList.add("on");
+
+  try {
+    setDetectStatus("Downloading the note detector (first time only, about 3 MB)…");
+    const basicPitch = await getBasicPitch();
+
+    setDetectStatus("Preparing the sound…");
+    const samples = await toBasicPitchFormat(state.audio);
+
+    setDetectStatus("Listening for notes…");
+    const frames = [], onsets = [], contours = [];
+    tf.engine().startScope();   // free the phone's memory automatically afterwards
+    try {
+      await basicPitch.evaluateModel(
+        samples,
+        (f, o, c) => { frames.push(...f); onsets.push(...o); contours.push(...c); },
+        p => { detectProgress.value = p; }
+      );
+    } finally {
+      tf.engine().endScope();
+    }
+
+    const { outputToNotesPoly, addPitchBendsToNoteEvents, noteFramesToTime } = BasicPitchLib;
+    const raw = noteFramesToTime(addPitchBendsToNoteEvents(contours,
+      outputToNotesPoly(frames, onsets, DETECT.onsetThreshold, DETECT.frameThreshold,
+                        DETECT.minNoteFrames, true, DETECT.maxHz, DETECT.minHz, true)));
+
+    state.notes = keepOneNoteAtATime(raw.map(n => ({
+      start: n.startTimeSeconds,
+      duration: n.durationSeconds,
+      midi: n.pitchMidi,
+      amplitude: n.amplitude,
+    })));
+
+    showNotes();
+  } catch (err) {
+    console.error(err);
+    setDetectStatus("Note detection failed: " + err.message + ". Check your internet connection and try again.", true);
+  } finally {
+    detectProgress.classList.remove("on");
+    detectBtn.disabled = false;
+  }
+}
+
+// Basic Pitch can hear chords, but a sax plays one note at a time.
+// When two notes overlap, keep the stronger one if they start together
+// (usually a "ghost" harmonic), otherwise end the earlier note when the next begins.
+function keepOneNoteAtATime(notes) {
+  notes.sort((a, b) => a.start - b.start);
+  const result = [];
+  for (const note of notes) {
+    const prev = result[result.length - 1];
+    if (prev && note.start < prev.start + prev.duration) {
+      const startedTogether = note.start - prev.start < 0.06;
+      if (startedTogether) {
+        const strength = n => n.amplitude * n.duration;
+        if (strength(note) > strength(prev)) result[result.length - 1] = note;
+        continue;
+      }
+      prev.duration = note.start - prev.start;   // cut the earlier note short
+    }
+    result.push(note);
+  }
+  return result.filter(n => n.duration >= 0.06);
+}
+
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+function midiToName(midi) {
+  return NOTE_NAMES[midi % 12] + (Math.floor(midi / 12) - 1);
+}
+
+function showNotes() {
+  notesListEl.innerHTML = "";
+  if (state.notes.length === 0) {
+    setDetectStatus("No notes found. Try playing louder or closer to the microphone.", true);
+    return;
+  }
+  for (const n of state.notes) {
+    const li = document.createElement("li");
+    li.innerHTML = `<b>${midiToName(n.midi)}</b> <span>${n.start.toFixed(2)}s · ${n.duration.toFixed(2)}s</span>`;
+    notesListEl.appendChild(li);
+  }
+  playNotesBtn.disabled = false;
+  setDetectStatus(`Found ${state.notes.length} notes (concert pitch: what a piano would play). ` +
+                  `Each shows: note, when it starts, how long it lasts.`);
+}
+
+// Play the detected notes with a simple electronic tone, so you can compare
+// them with your recording by ear.
+let notePlayback = [];
+playNotesBtn.addEventListener("click", () => {
+  if (notePlayback.length) { stopNotePlayback(); return; }
+  const ctx = getAudioContext();
+  ctx.resume();
+  const t0 = ctx.currentTime + 0.1;
+  for (const n of state.notes) {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "triangle";
+    osc.frequency.value = 440 * 2 ** ((n.midi - 69) / 12);
+    const start = t0 + n.start, end = start + n.duration;
+    gain.gain.setValueAtTime(0, start);
+    gain.gain.linearRampToValueAtTime(0.3, start + 0.02);
+    gain.gain.setValueAtTime(0.3, Math.max(start + 0.02, end - 0.04));
+    gain.gain.linearRampToValueAtTime(0, end);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(start);
+    osc.stop(end + 0.05);
+    notePlayback.push(osc);
+  }
+  notePlayback[notePlayback.length - 1].onended = stopNotePlayback;
+  playNotesBtn.textContent = "■ Stop";
+});
+
+function stopNotePlayback() {
+  for (const osc of notePlayback) { try { osc.stop(); } catch (e) {} }
+  notePlayback = [];
+  playNotesBtn.textContent = "▶ Play detected notes";
+}
 </script>
 </body>
 </html>

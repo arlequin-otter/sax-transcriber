@@ -4,4 +4,4 @@ desktop.ini
 .DS_Store
 .vscode/
 # Claude Code local settings
-.claude/settings.local.json
+.claude/
